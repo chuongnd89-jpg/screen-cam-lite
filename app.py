@@ -1341,7 +1341,7 @@ class ScreenCamLiteApp(ctk.CTk):
         self.floating_frame.show(result["left"], result["top"], result["width"], result["height"])
         self.btn_toggle_frame.configure(fg_color="#059669", hover_color="#047857", text="👁️ Khung: BẬT")
 
-    def _on_floating_region_moved(self, left, top, width, height):
+    def _on_floating_region_moved(self, left, top, width, height, final=False):
         if self.custom_region:
             self.custom_region["left"] = left
             self.custom_region["top"] = top
@@ -1356,7 +1356,8 @@ class ScreenCamLiteApp(ctk.CTk):
                 for s in self.sources:
                     if s.get("kind") == "region":
                         s.update(self.custom_region)
-                self.source_menu.configure(values=[s["label"] for s in self.sources])
+                if final:
+                    self.source_menu.configure(values=[s["label"] for s in self.sources])
 
     def _toggle_floating_frame(self):
         if self.recorder.is_recording:

@@ -9,6 +9,7 @@ import threading
 import time
 from datetime import datetime
 from PIL import Image, ImageDraw
+import mss
 from devices import get_ffmpeg_path
 
 logger = logging.getLogger("ScreenCamLite.recorder")
@@ -164,11 +165,31 @@ class RecorderSession:
             return ["-c:v", "h264_mf", "-b:v", prof["mf_kbps"], "-pix_fmt", "nv12"]
         return ["-c:v", "libx264", "-preset", "ultrafast", "-crf", prof["x264_crf"], "-threads", "2", "-pix_fmt", "yuv420p"]
 
+    def _clamped_region(self, src: dict) -> tuple:
+        """Ensures capture coordinates never extend outside Windows virtual desktop bounds."""
+        x = int(src["left"])
+        y = int(src["top"])
+        w = _even(src["width"])
+        h = _even(src["height"])
+        try:
+            with mss.MSS() as sct:
+                vmon = sct.monitors[0]
+                vx, vy = int(vmon["left"]), int(vmon["top"])
+                vw, vh = int(vmon["width"]), int(vmon["height"])
+            w = min(_even(vw), max(32, w))
+            h = min(_even(vh), max(32, h))
+            x = max(vx, min(vx + vw - w, x))
+            y = max(vy, min(vy + vh - h, y))
+        except Exception:
+            logger.debug("Could not query virtual bounds for clamping", exc_info=True)
+        return x, y, w, h
+
     def _screen_input_args(self, cfg: dict) -> list:
         src = cfg["source"]
         fps = str(cfg["fps"])
         if src["kind"] == "window":
             return ["-thread_queue_size", "512", "-f", "gdigrab", "-framerate", fps, "-draw_mouse", "1", "-i", f"title={src['title']}"]
+        x, y, w, h = self._clamped_region(src)
         return [
             "-thread_queue_size",
             "512",
@@ -179,11 +200,11 @@ class RecorderSession:
             "-draw_mouse",
             "1",
             "-offset_x",
-            str(src["left"]),
+            str(x),
             "-offset_y",
-            str(src["top"]),
+            str(y),
             "-video_size",
-            f"{src['width']}x{src['height']}",
+            f"{w}x{h}",
             "-i",
             "desktop",
         ]

@@ -14,6 +14,23 @@ def _even(v: int) -> int:
     return max(2, (int(v) // 2) * 2)
 
 
+def get_virtual_bounds() -> tuple:
+    """Returns (left, top, width, height) of the Windows virtual desktop."""
+    with mss.MSS() as sct:
+        vmon = sct.monitors[0]
+        return int(vmon["left"]), int(vmon["top"]), int(vmon["width"]), int(vmon["height"])
+
+
+def clamp_region_to_desktop(left: int, top: int, width: int, height: int, bounds: tuple = None) -> tuple:
+    """Clamps a capture rectangle cleanly inside virtual desktop bounds with even dimensions."""
+    vx, vy, vw, vh = bounds or get_virtual_bounds()
+    w = min(_even(vw), max(32, _even(width)))
+    h = min(_even(vh), max(32, _even(height)))
+    x = max(vx, min(vx + vw - w, int(left)))
+    y = max(vy, min(vy + vh - h, int(top)))
+    return x, y, w, h
+
+
 class RegionSelector:
     """Full-screen interactive desktop overlay to draw, move, and resize a recording rectangle."""
 
@@ -382,13 +399,13 @@ class RegionSelector:
             nx1, ny1, nx2, ny2 = ox1, oy1, ox2, oy2
             m = self.drag_mode
             if "w" in m:
-                nx1 = min(ox2 - 32, ox1 + dx)
+                nx1 = max(0, min(ox2 - 32, ox1 + dx))
             if "e" in m:
-                nx2 = max(ox1 + 32, ox2 + dx)
+                nx2 = min(self.vw, max(ox1 + 32, ox2 + dx))
             if "n" in m:
-                ny1 = min(oy2 - 32, oy1 + dy)
+                ny1 = max(0, min(oy2 - 32, oy1 + dy))
             if "s" in m:
-                ny2 = max(oy1 + 32, oy2 + dy)
+                ny2 = min(self.vh, max(oy1 + 32, oy2 + dy))
             self.x1, self.y1, self.x2, self.y2 = nx1, ny1, nx2, ny2
             self._update_shapes()
 
@@ -423,14 +440,19 @@ class RegionSelector:
             self._cancel()
             return
         bx1, by1, bx2, by2 = self._box_coords()
-        w = _even(bx2 - bx1)
-        h = _even(by2 - by1)
-        if w < 32 or h < 32:
+        raw_w = bx2 - bx1
+        raw_h = by2 - by1
+        if raw_w < 32 or raw_h < 32:
             self._cancel()
             return
 
-        real_x = int(self.vx + bx1)
-        real_y = int(self.vy + by1)
+        real_x, real_y, w, h = clamp_region_to_desktop(
+            self.vx + bx1,
+            self.vy + by1,
+            raw_w,
+            raw_h,
+            bounds=(self.vx, self.vy, self.vw, self.vh),
+        )
 
         result = {
             "id": "region:custom",
@@ -460,36 +482,45 @@ class FloatingRegionFrame:
         self.on_region_changed = on_region_changed
         self.on_close = on_close
         self.win = None
+        self.vx, self.vy, self.vw, self.vh = get_virtual_bounds()
         self.left = 100
         self.top = 100
         self.width = 800
         self.height = 600
+        self.bar_height = 28
+        self._bar_inside = False
         self.visible = False
 
+        self._dragging = False
         self._drag_start_x = 0
         self._drag_start_y = 0
         self._orig_x = 0
         self._orig_y = 0
 
     def show(self, left: int, top: int, width: int, height: int):
-        self.left = int(left)
-        self.top = int(top)
-        self.width = _even(width)
-        self.height = _even(height)
+        self.vx, self.vy, self.vw, self.vh = get_virtual_bounds()
+        self.left, self.top, self.width, self.height = clamp_region_to_desktop(
+            left, top, width, height, bounds=(self.vx, self.vy, self.vw, self.vh)
+        )
+        self._bar_inside = self.top < (self.vy + self.bar_height)
         self.visible = True
 
         if not self.win or not self.win.winfo_exists():
             self._create_window()
         else:
             self._update_geometry()
+            self._render_elements()
             self.win.deiconify()
 
     def hide(self):
+        self.visible = False
+        self._dragging = False
         if self.win and self.win.winfo_exists():
             self.win.withdraw()
 
     def destroy(self):
         self.visible = False
+        self._dragging = False
         if self.win and self.win.winfo_exists():
             self.win.destroy()
             self.win = None
@@ -502,7 +533,6 @@ class FloatingRegionFrame:
         self.win.attributes("-transparentcolor", "#010101")
         self.win.configure(bg="#010101")
 
-        self.bar_height = 28
         self._update_geometry()
 
         # Canvas with transparent center
@@ -514,8 +544,11 @@ class FloatingRegionFrame:
         self._render_elements()
 
     def _update_geometry(self):
-        tot_h = self.height + self.bar_height
-        self.win.geometry(f"{self.width}x{tot_h}+{self.left}+{self.top - self.bar_height}")
+        if self._bar_inside:
+            self.win.geometry(f"{self.width}x{self.height}+{self.left}+{self.top}")
+        else:
+            tot_h = self.height + self.bar_height
+            self.win.geometry(f"{self.width}x{tot_h}+{self.left}+{self.top - self.bar_height}")
 
     def _render_elements(self):
         self.canvas.delete("all")
@@ -523,61 +556,92 @@ class FloatingRegionFrame:
         h = self.height
         bh = self.bar_height
 
-        # Top title bar (drag handle)
-        self.canvas.create_rectangle(
-            0, 0, w, bh, fill="#0f172a", outline="#00e5ff", width=1.5
-        )
-        title_text = f" ✥ Vùng quay {w}×{h} (Kéo thanh này để di chuyển) "
-        self.canvas.create_text(
-            10, bh // 2, anchor="w",
-            text=title_text, fill="#38bdf8", font=("Segoe UI", 9, "bold")
-        )
-
-        # Close button in top-right
-        close_x = w - 24
-        self.canvas.create_text(
-            close_x, bh // 2, anchor="center",
-            text="✕", fill="#ef4444", font=("Segoe UI", 10, "bold")
-        )
+        bar_w = min(w, 340) if self._bar_inside else w
+        rect_top = 0 if self._bar_inside else bh
+        rect_bottom = (h - 1) if self._bar_inside else (bh + h - 1)
 
         # 2px Glowing border around recording box
         self.canvas.create_rectangle(
-            1, bh, w - 1, bh + h - 1,
-            outline="#00e5ff", width=2
+            1, rect_top, w - 1, rect_bottom,
+            outline="#00e5ff", width=2, tags="border"
         )
 
-        # Bindings for dragging the top bar
-        self.canvas.tag_bind("all", "<ButtonPress-1>", self._on_press)
-        self.canvas.tag_bind("all", "<B1-Motion>", self._on_drag)
-        self.canvas.tag_bind("all", "<ButtonRelease-1>", self._on_release)
+        # Title / drag handle bar
+        self.canvas.create_rectangle(
+            0, 0, bar_w, bh, fill="#0f172a", outline="#00e5ff", width=1.5, tags="bar"
+        )
+        if bar_w < 260:
+            title_text = f" ✥ {w}×{h}"
+        else:
+            title_text = f" ✥ Vùng quay {w}×{h} (Kéo để di chuyển)"
+        self.canvas.create_text(
+            8, bh // 2, anchor="w",
+            text=title_text, fill="#38bdf8", font=("Segoe UI", 9, "bold"), tags="bar"
+        )
+
+        # Close button in top-right of bar
+        close_x = bar_w - 18
+        self.canvas.create_text(
+            close_x, bh // 2, anchor="center",
+            text="✕", fill="#ef4444", font=("Segoe UI", 10, "bold"), tags="close"
+        )
+
+        self.canvas.tag_bind("bar", "<Enter>", lambda _e: self.canvas.configure(cursor="fleur"))
+        self.canvas.tag_bind("bar", "<Leave>", lambda _e: self.canvas.configure(cursor="arrow"))
+        self.canvas.tag_bind("border", "<Enter>", lambda _e: self.canvas.configure(cursor="fleur"))
+        self.canvas.tag_bind("border", "<Leave>", lambda _e: self.canvas.configure(cursor="arrow"))
+
+        self.canvas.bind("<ButtonPress-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
 
     def _on_press(self, event):
+        bar_w = min(self.width, 340) if self._bar_inside else self.width
         # Check if close clicked
-        if event.y < self.bar_height and event.x >= self.width - 32:
+        if event.y <= self.bar_height and (bar_w - 32) <= event.x <= bar_w:
             self.hide()
             if self.on_close:
                 self.on_close()
             return
 
-        if event.y <= self.bar_height:
+        in_bar = event.y <= self.bar_height and event.x <= bar_w
+        on_border = (
+            event.x <= 8
+            or event.x >= self.width - 8
+            or event.y >= (self.height if self._bar_inside else self.height + self.bar_height) - 8
+        )
+        if in_bar or on_border:
+            self._dragging = True
             self._drag_start_x = event.x_root
             self._drag_start_y = event.y_root
             self._orig_x = self.left
             self._orig_y = self.top
+        else:
+            self._dragging = False
 
     def _on_drag(self, event):
-        if not hasattr(self, "_drag_start_x"):
+        if not self._dragging:
             return
         dx = event.x_root - self._drag_start_x
         dy = event.y_root - self._drag_start_y
 
-        self.left = self._orig_x + dx
-        self.top = self._orig_y + dy
+        nx = self._orig_x + dx
+        ny = self._orig_y + dy
+        self.left = max(self.vx, min(self.vx + self.vw - self.width, int(nx)))
+        self.top = max(self.vy, min(self.vy + self.vh - self.height, int(ny)))
         self._update_geometry()
 
         if self.on_region_changed:
-            self.on_region_changed(self.left, self.top, self.width, self.height)
+            self.on_region_changed(self.left, self.top, self.width, self.height, final=False)
 
     def _on_release(self, _event):
+        if not self._dragging:
+            return
+        self._dragging = False
+        new_inside = self.top < (self.vy + self.bar_height)
+        if new_inside != self._bar_inside:
+            self._bar_inside = new_inside
+            self._update_geometry()
+            self._render_elements()
         if self.on_region_changed:
-            self.on_region_changed(self.left, self.top, self.width, self.height)
+            self.on_region_changed(self.left, self.top, self.width, self.height, final=True)
