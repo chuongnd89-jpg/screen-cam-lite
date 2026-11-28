@@ -21,12 +21,14 @@ from devices import (
     detect_best_encoder,
     get_asset_path,
     get_ffmpeg_path,
+    get_window_rect,
     list_dshow_cameras,
     list_monitors,
     list_windows,
 )
 from logger_setup import get_log_file_path, setup_logging
 from recorder import QUALITY_PROFILES, RecorderSession
+from region_selector import FloatingRegionFrame, RegionSelector
 
 logger = setup_logging()
 
@@ -126,6 +128,9 @@ class ScreenCamLiteApp(ctk.CTk):
 
         self.sources = []
         self.selected_source = None
+        self.custom_region = None
+        self.floating_frame = None
+        self._frame_was_visible = False
         self.cameras = []
         self.selected_cam_idx = 0
         self.audio_devices = {"mics": [], "loopbacks": []}
@@ -261,8 +266,8 @@ class ScreenCamLiteApp(ctk.CTk):
         src_bar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         src_bar.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(src_bar, text="Nguồn quay:", text_color="#94a3b8", font=ctk.CTkFont(size=12)).grid(
-            row=0, column=0, padx=(12, 6), pady=8
+        ctk.CTkLabel(src_bar, text="Nguồn:", text_color="#94a3b8", font=ctk.CTkFont(size=12)).grid(
+            row=0, column=0, padx=(10, 4), pady=7
         )
         self.source_var = ctk.StringVar(value="Đang tải...")
         self.source_menu = ctk.CTkOptionMenu(
@@ -273,27 +278,51 @@ class ScreenCamLiteApp(ctk.CTk):
             button_color="#253047",
             command=self._on_source_selected,
         )
-        self.source_menu.grid(row=0, column=1, sticky="ew", padx=6, pady=7)
+        self.source_menu.grid(row=0, column=1, sticky="ew", padx=4, pady=7)
+
+        self.btn_select_region = ctk.CTkButton(
+            src_bar,
+            text="📐 Vẽ vùng",
+            width=86,
+            height=28,
+            fg_color="#2563eb",
+            hover_color="#1d4ed8",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._start_region_selection,
+        )
+        self.btn_select_region.grid(row=0, column=2, padx=4)
+
+        self.btn_toggle_frame = ctk.CTkButton(
+            src_bar,
+            text="👁️ Khung viền",
+            width=90,
+            height=28,
+            fg_color="#1e293b",
+            hover_color="#334155",
+            font=ctk.CTkFont(size=11),
+            command=self._toggle_floating_frame,
+        )
+        self.btn_toggle_frame.grid(row=0, column=3, padx=4)
 
         self.preview_switch = ctk.CTkSwitch(
             src_bar,
             text="Xem trước",
-            width=90,
+            width=85,
             command=self._on_toggle_preview,
         )
         self.preview_switch.select()
-        self.preview_switch.grid(row=0, column=2, padx=8)
+        self.preview_switch.grid(row=0, column=4, padx=6)
 
         self.btn_refresh = ctk.CTkButton(
             src_bar,
             text="Làm mới",
-            width=82,
+            width=76,
             height=28,
             fg_color="#1e293b",
             hover_color="#334155",
             command=self._refresh_sources_and_devices,
         )
-        self.btn_refresh.grid(row=0, column=3, padx=(4, 10))
+        self.btn_refresh.grid(row=0, column=5, padx=(4, 8))
 
         # Preview Viewport (native tk.Label + single persistent PhotoImage avoids CTkImage pyimage GC errors)
         viewport = ctk.CTkFrame(stage, fg_color="#07090f", corner_radius=14, border_width=1, border_color="#232c40")
@@ -651,13 +680,21 @@ class ScreenCamLiteApp(ctk.CTk):
         self.recorder.encoder_info = enc
         self.encoder_badge.configure(text=f"⚡ {enc['label']}")
 
+        if self.custom_region:
+            sources = [self.custom_region] + sources
+
         self.sources = sources
         if sources:
             labels = [s["label"] for s in sources]
             self.source_menu.configure(values=labels)
-            if not self.selected_source:
+            if not self.selected_source or not any(s["id"] == self.selected_source.get("id") for s in sources):
                 self.selected_source = sources[0]
                 self.source_var.set(sources[0]["label"])
+            else:
+                for s in sources:
+                    if s["id"] == self.selected_source["id"]:
+                        self.source_var.set(s["label"])
+                        break
 
         self.cameras = cams
         if cams:
@@ -752,8 +789,23 @@ class ScreenCamLiteApp(ctk.CTk):
         if self.mode == "webcam" or not self.selected_source:
             return None
         src = self.selected_source
-        if src["kind"] == "monitor":
+        if src["kind"] in ("monitor", "region"):
             mon = {"left": src["left"], "top": src["top"], "width": src["width"], "height": src["height"]}
+        elif src["kind"] == "window":
+            left = src.get("left", 0)
+            top = src.get("top", 0)
+            w = src.get("width", 0)
+            h = src.get("height", 0)
+            hwnd = src.get("hwnd")
+            if hwnd:
+                try:
+                    left, top, w, h = get_window_rect(hwnd)
+                except Exception:
+                    pass
+            if w > 32 and h > 32:
+                mon = {"left": left, "top": top, "width": w, "height": h}
+            else:
+                mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
         else:
             mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
         try:
@@ -967,6 +1019,12 @@ class ScreenCamLiteApp(ctk.CTk):
             messagebox.showwarning("Thiếu Webcam", "Không tìm thấy Webcam cho chế độ đã chọn.")
             return
 
+        # Hide floating bounding frame during recording to avoid recording the border
+        if self.floating_frame and self.floating_frame.visible:
+            self._frame_was_visible = True
+            self.floating_frame.hide()
+            self.btn_toggle_frame.configure(fg_color="#1e293b", hover_color="#334155", text="👁️ Khung viền")
+
         # Release preview webcam immediately so FFmpeg dshow owns it exclusively
         self._countdown_active = True
         self._countdown_token += 1
@@ -1105,6 +1163,18 @@ class ScreenCamLiteApp(ctk.CTk):
         if self.auto_minimize and self.state() == "iconic":
             self.deiconify()
 
+        # Restore floating frame if it was active before recording
+        if getattr(self, "_frame_was_visible", False):
+            self._frame_was_visible = False
+            if self.custom_region and self.floating_frame:
+                self.floating_frame.show(
+                    self.custom_region["left"],
+                    self.custom_region["top"],
+                    self.custom_region["width"],
+                    self.custom_region["height"],
+                )
+                self.btn_toggle_frame.configure(fg_color="#059669", hover_color="#047857", text="👁️ Khung: BẬT")
+
     def _on_stop_success(self, saved_paths):
         self._finish_stop_ui()
         self._refresh_library()
@@ -1121,6 +1191,8 @@ class ScreenCamLiteApp(ctk.CTk):
         state = "disabled" if locked else "normal"
         for widget in (
             self.source_menu,
+            self.btn_select_region,
+            self.btn_toggle_frame,
             self.cam_menu,
             self.mic_menu,
             self.sys_menu,
@@ -1198,7 +1270,121 @@ class ScreenCamLiteApp(ctk.CTk):
         for s in self.sources:
             if s["label"] == label:
                 self.selected_source = s
+                if s.get("kind") != "region" and self.floating_frame:
+                    self.floating_frame.hide()
+                    self.btn_toggle_frame.configure(fg_color="#1e293b", hover_color="#334155", text="👁️ Khung viền")
+                elif s.get("kind") == "region" and self.floating_frame and self.custom_region:
+                    self.floating_frame.show(
+                        self.custom_region["left"],
+                        self.custom_region["top"],
+                        self.custom_region["width"],
+                        self.custom_region["height"],
+                    )
+                    self.btn_toggle_frame.configure(fg_color="#059669", hover_color="#047857", text="👁️ Khung: BẬT")
                 break
+
+    # ---------- Region Selection & Floating Frame ----------
+
+    def _start_region_selection(self):
+        if self.recorder.is_recording:
+            messagebox.showwarning("Đang ghi hình", "Không thể đổi vùng quay khi đang quay video.")
+            return
+        if self.floating_frame:
+            self.floating_frame.hide()
+
+        self.withdraw()
+        self.after(200, self._launch_region_selector)
+
+    def _launch_region_selector(self):
+        try:
+            RegionSelector(
+                self,
+                initial_region=self.custom_region,
+                on_selected=self._on_region_selected,
+            )
+        except Exception as exc:
+            logger.exception("Failed to launch region selector")
+            self.deiconify()
+            messagebox.showerror("Lỗi chọn vùng", f"Không thể mở công cụ vẽ vùng:\n{exc}")
+
+    def _on_region_selected(self, result):
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
+        if not result:
+            if self.floating_frame and self.custom_region and self.selected_source and self.selected_source.get("kind") == "region":
+                self.floating_frame.show(
+                    self.custom_region["left"],
+                    self.custom_region["top"],
+                    self.custom_region["width"],
+                    self.custom_region["height"],
+                )
+            return
+
+        self.custom_region = result
+        self.sources = [s for s in self.sources if s.get("kind") != "region"]
+        self.sources.insert(0, result)
+
+        labels = [s["label"] for s in self.sources]
+        self.source_menu.configure(values=labels)
+        self.selected_source = result
+        self.source_var.set(result["label"])
+        self.btn_select_region.configure(text="📐 Đổi vùng")
+
+        if not self.floating_frame:
+            self.floating_frame = FloatingRegionFrame(
+                self,
+                on_region_changed=self._on_floating_region_moved,
+                on_close=self._on_floating_frame_closed,
+            )
+        self.floating_frame.show(result["left"], result["top"], result["width"], result["height"])
+        self.btn_toggle_frame.configure(fg_color="#059669", hover_color="#047857", text="👁️ Khung: BẬT")
+
+    def _on_floating_region_moved(self, left, top, width, height):
+        if self.custom_region:
+            self.custom_region["left"] = left
+            self.custom_region["top"] = top
+            self.custom_region["width"] = width
+            self.custom_region["height"] = height
+            new_label = f"📐 Vùng quay: {width}×{height} (tại {left}, {top})"
+            self.custom_region["label"] = new_label
+
+            if self.selected_source and self.selected_source.get("kind") == "region":
+                self.selected_source = self.custom_region
+                self.source_var.set(new_label)
+                for s in self.sources:
+                    if s.get("kind") == "region":
+                        s.update(self.custom_region)
+                self.source_menu.configure(values=[s["label"] for s in self.sources])
+
+    def _toggle_floating_frame(self):
+        if self.recorder.is_recording:
+            return
+        if not self.custom_region:
+            self._start_region_selection()
+            return
+
+        if self.floating_frame and self.floating_frame.visible:
+            self.floating_frame.hide()
+            self.btn_toggle_frame.configure(fg_color="#1e293b", hover_color="#334155", text="👁️ Khung viền")
+        else:
+            if not self.floating_frame:
+                self.floating_frame = FloatingRegionFrame(
+                    self,
+                    on_region_changed=self._on_floating_region_moved,
+                    on_close=self._on_floating_frame_closed,
+                )
+            self.floating_frame.show(
+                self.custom_region["left"],
+                self.custom_region["top"],
+                self.custom_region["width"],
+                self.custom_region["height"],
+            )
+            self.btn_toggle_frame.configure(fg_color="#059669", hover_color="#047857", text="👁️ Khung: BẬT")
+
+    def _on_floating_frame_closed(self):
+        self.btn_toggle_frame.configure(fg_color="#1e293b", hover_color="#334155", text="👁️ Khung viền")
 
     def _on_cam_changed(self, name: str):
         for idx, c in enumerate(self.cameras):
@@ -1420,6 +1606,11 @@ class ScreenCamLiteApp(ctk.CTk):
         if self._hotkey_tid:
             try:
                 ctypes.windll.user32.PostThreadMessageW(self._hotkey_tid, 0x0012, 0, 0)  # WM_QUIT
+            except Exception:
+                pass
+        if self.floating_frame:
+            try:
+                self.floating_frame.destroy()
             except Exception:
                 pass
         self.audio_mixer.shutdown()

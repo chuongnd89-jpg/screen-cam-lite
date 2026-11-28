@@ -65,6 +65,28 @@ def list_monitors():
     return results
 
 
+class RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+def get_window_rect(hwnd):
+    rect = RECT()
+    DWMWA_EXTENDED_FRAME_BOUNDS = 9
+    try:
+        dwmapi = ctypes.windll.dwmapi
+        hr = dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, ctypes.byref(rect), ctypes.sizeof(rect))
+        if hr == 0:
+            w = max(2, ((rect.right - rect.left) // 2) * 2)
+            h = max(2, ((rect.bottom - rect.top) // 2) * 2)
+            return rect.left, rect.top, w, h
+    except Exception:
+        pass
+    ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    w = max(2, ((rect.right - rect.left) // 2) * 2)
+    h = max(2, ((rect.bottom - rect.top) // 2) * 2)
+    return rect.left, rect.top, w, h
+
+
 def list_windows():
     user32 = ctypes.windll.user32
     windows = []
@@ -73,7 +95,7 @@ def list_windows():
     EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
 
     def callback(hwnd, _lparam):
-        if not user32.IsWindowVisible(hwnd):
+        if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
             return True
         length = user32.GetWindowTextLengthW(hwnd)
         if length <= 0:
@@ -85,7 +107,19 @@ def list_windows():
             return True
         if title not in seen:
             seen.add(title)
-            windows.append({"id": f"window:{title}", "kind": "window", "label": f"Cửa sổ: {title}", "title": title})
+            left, top, w, h = get_window_rect(hwnd)
+            if w >= 120 and h >= 120:
+                windows.append({
+                    "id": f"window:{title}",
+                    "kind": "window",
+                    "label": f"Cửa sổ: {title} ({w}×{h})",
+                    "title": title,
+                    "hwnd": hwnd,
+                    "left": left,
+                    "top": top,
+                    "width": w,
+                    "height": h,
+                })
         return True
 
     user32.EnumWindows(EnumWindowsProc(callback), 0)

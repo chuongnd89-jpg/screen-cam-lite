@@ -57,6 +57,10 @@ Trong thư mục source code đã có sẵn file `build.bat`:
 
 ## 🌟 Tính năng chính
 
+- **Nguồn quay linh hoạt (Màn hình, Vùng chọn, Cửa sổ):**
+  - **Full Màn hình:** Hỗ trợ từng màn hình riêng lẻ hoặc toàn bộ các màn hình ghép lại.
+  - **Vẽ vùng tùy chỉnh (`📐 Vẽ vùng`):** Kéo chuột vẽ hình chữ nhật trên desktop, tự do di chuyển / co giãn trước khi quay. Tích hợp `👁️ Khung viền` di động trực tiếp trên màn hình (tự động ẩn khi bắt đầu quay để không lọt viền vào video).
+  - **Quay theo Cửa sổ (`Cửa sổ: ...`):** Tự động nhận diện các ứng dụng đang mở, lấy đúng tọa độ và kích thước thực để quay khít ứng dụng mà không cần quay cả màn hình.
 - **6 chế độ quay:**
   - **Màn hình + Cam nhỏ (`pip`):** Màn hình nền, Webcam lồng góc (4 góc, Bo góc / Tròn / Vuông, kích thước `12–45%`, viền sáng, lật gương).
   - **Cam + Màn hình nhỏ (`pip-screen`):** Webcam nền, Màn hình nhỏ lồng góc.

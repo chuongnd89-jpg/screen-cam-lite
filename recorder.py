@@ -228,7 +228,8 @@ class RecorderSession:
             return (w, top_h + bot_h + 4)
 
         if res == "720p":
-            return (_even(720 * aspect), 720)
+            h = min(720, nat_h) if nat_h < 720 else 720
+            return (_even(h * aspect), _even(h))
         if res == "1080p":
             h = min(1080, nat_h)
             return (_even(h * aspect), _even(h))
